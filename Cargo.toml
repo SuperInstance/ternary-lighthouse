@@ -1,0 +1,6 @@
+[package]
+name = "ternary-lighthouse"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Guidance and warning system for fleet navigation using beacons, foghorns, and watchkeeping"
