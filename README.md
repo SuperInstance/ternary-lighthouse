@@ -1,81 +1,196 @@
 # ternary-lighthouse
 
-**An observability system disguised as a maritime metaphor.**
+Guidance and warning system for fleet navigation. Implements beacons for emitting directional signals, foghorns for low-visibility warnings, lenses for focusing attention, coded light patterns for identification, and watchkeepers for monitoring dangers — all using ternary directional semantics {-1, 0, +1}.
 
-A lighthouse does six things: it *emits* guidance signals (beacons), *warns* of danger (foghorns), *focuses* attention (lenses), *identifies* itself (coded light patterns), *monitors* conditions (watchkeepers), and *remembers* everything (ship's log). That's also what a good observability system does — and this crate implements both, using ternary signals throughout.
+## Why It Matters
 
-Every signal carries a ternary value: `+1` (positive/good/safe), `0` (neutral/unknown), `-1` (negative/danger/alert). Every warning has a severity level. Every pattern is a ternary code. The log records everything with timestamps and severity filtering.
+Autonomous fleet management requires reliable navigation aids. Physical lighthouses solve this for maritime navigation by providing:
+- **Beacons** — persistent signals for orientation ("you are here relative to me")
+- **Foghorns** — auditory warnings when visibility is poor (analog: degraded system health)
+- **Coded patterns** — unique identifiers distinguishing one light source from another
+- **Watchkeepers** — continuous monitoring with escalation protocols
 
-## What's Inside
+This crate translates these concepts to fleet management for GPU compute clusters:
+- **Beacons** = service health signals with ternary direction (negative/neutral/positive)
+- **Foghorns** = severity-tiered alerts (Low → Medium → High → Critical)
+- **Lenses** = attention-focusing filters that prioritize certain signal types
+- **Watchkeepers** = rule-based monitors that detect dangerous conditions
 
-- **`Lighthouse`** — central hub. Manages beacons, foghorns, and the ship's log
-- **`Beacon`** — emits `Signal`s with direction (ternary), strength (0-1), and message
-- **`Foghorn`** — emits `Warning`s with severity (Low/Medium/High/Critical) and message
-- **`Lens`** — focus on signals matching a keyword, amplify their strength. Like a log filter with gain
-- **`LightPattern`** — ternary identification codes. Match patterns, compute similarity, generate checksums (mod 3)
-- **`WatchKeeper`** — register known dangers, check conditions against thresholds. Only alerts when danger × condition exceeds alert level
-- **`ShipLog`** — timestamped entries with severity, filtering, and recent-N retrieval. The memory of the system
+The ternary direction {-1, 0, +1} encodes whether a signal is negative (trouble), neutral (informational), or positive (healthy), giving consumers a three-state semantic without parsing message content.
 
-## Quick Example
+## How It Works
+
+### Signal Model
+
+Each beacon emits a `Signal`:
+
+```
+Signal = {
+    source: String,        // beacon identifier
+    direction: Ternary,    // −1 = negative, 0 = neutral, +1 = positive
+    strength: f64,         // [0.0, ∞) — signal amplitude
+    message: String        // human-readable content
+}
+```
+
+The ternary direction provides **O(1) triage** — a consumer can filter signals by direction without parsing:
+
+```
+signals.filter(|s| s.direction == Ternary::Neg)  // all trouble signals
+```
+
+### Severity Escalation
+
+Warnings carry a severity level using a 4-tier ordinal scale:
+
+```
+Low < Medium < High < Critical
+```
+
+The `Ord` derivation enables:
+- **Threshold filtering**: `warnings.filter(|w| w.severity >= Severity::High)`
+- **Priority queues**: sort by severity descending
+- **Escalation rules**: if Low warnings persist for N ticks, escalate to Medium
+
+### Coded Light Patterns
+
+Inspired by real lighthouses (each has a unique flash pattern), the crate supports coded patterns for beacon identification:
+
+A pattern is a ternary sequence — each element is {-1 (dark), 0 (dim), +1 (bright)}:
+
+```
+Pattern = [1, 1, 0, −1, 0]  →  "flash-flash-dim-dark-dim"
+```
+
+Two beacons with identical names can be distinguished by their patterns, enabling multi-source navigation in dense fleet topologies.
+
+### Watchkeeper Logic
+
+Watchkeepers are rule-based monitors. Each watch defines:
+- **Watched resource**: beacon name or signal source
+- **Trigger condition**: e.g., direction == Neg AND severity >= High
+- **Action**: log, escalate, or broadcast warning
+
+The watchkeeper evaluates active signals against all registered watches each scan cycle.
+
+### Signal Attenuation
+
+Signal strength follows inverse-square attenuation with distance:
+
+```
+strength_at(d) = strength₀ / max(1, d²)
+```
+
+where d = number of network hops (not physical distance). This models how information degrades in multi-hop fleet communication.
+
+### Complexity
+
+| Operation | Time | Space |
+|-----------|------|-------|
+| `Lighthouse::scan()` | O(B) | O(B) |
+| `Lighthouse::sound_warnings()` | O(F) | O(F) |
+| `Beacon::emit()` | O(1) | O(1) |
+| `Foghorn::sound()` | O(1) | O(1) |
+| `ShipLog::record(entry)` | O(1) amortized | O(1) |
+| `ShipLog::query(filters)` | O(N) | O(k) |
+
+Where B = number of beacons, F = number of foghorns, N = log entries, k = matching entries.
+
+## Quick Start
 
 ```rust
-use ternary_lighthouse::*;
+use ternary_lighthouse::{Lighthouse, Beacon, Foghorn, Severity, Ternary};
 
-// Create a lighthouse for your system
-let mut lh = Lighthouse::new("production");
+let mut lighthouse = Lighthouse::new("Fleet Control");
 
 // Register guidance beacons
-lh.add_beacon(Beacon::new("api-health", Ternary::Pos, 0.9));
-lh.add_beacon(Beacon::new("db-latency", Ternary::Neg, 0.6));
+let mut beacon = Beacon::new("gpu-cluster-health");
+beacon.direction = Ternary::Pos;
+beacon.active = true;
+beacon.strength = 0.95;
+beacon.message = "All GPUs operational".to_string();
+lighthouse.add_beacon(beacon);
 
-// Register warnings
-lh.add_foghorn(Foghorn::new("disk-space", Severity::High, "Disk usage above 90%"));
+// Register warning foghorns
+let mut foghorn = Foghorn::new("thermal-alert");
+foghorn.severity = Severity::High;
+foghorn.active = true;
+foghorn.message = "GPU 3 temperature: 89°C".to_string();
+lighthouse.add_foghorn(foghorn);
 
-// Scan for signals
-let signals = lh.scan();
-// [Signal{direction: Pos, strength: 0.9}, Signal{direction: Neg, strength: 0.6}]
+// Scan all active beacons
+let signals = lighthouse.scan();
+for signal in &signals {
+    println!("[{}] {} (strength: {:.2})",
+        signal.source, signal.message, signal.strength);
+}
 
-// Focus with a lens
-let lens = Lens::new("api", 3.0);
-let focused = lens.focus(&signals);
-// Only the api-health beacon survives the filter
+// Sound all warnings
+let warnings = lighthouse.sound_warnings();
+for warning in &warnings {
+    println!("WARNING [{:?}]: {}", warning.severity, warning.message);
+}
 
-// Watchkeeper monitors dangers
-let mut wk = WatchKeeper::new("ops", Severity::Medium);
-wk.register_danger("cpu-spike", Severity::High);
-// check() against current conditions → alerts only when threshold exceeded
-
-// Log everything
-lh.log_mut().record("monitor", "System healthy", Severity::Low);
-let recent = lh.log().recent(10);
-let critical = lh.log().filter_severity(Severity::Critical);
+// Log observations
+lighthouse.log_mut().record("All systems nominal at T=0");
 ```
 
-## The Deeper Truth
+## API
 
-**Observability is navigation.** You're steering a system through fog. The beacons tell you where you are. The foghorns warn you what's ahead. The lens focuses your attention when there's too much noise. The watchkeeper handles the repetitive checking so you don't have to. The ship's log is how you learn from the past.
+### `Lighthouse`
 
-The ternary constraint is deliberate: `+1/0/-1` is exactly the resolution you need for operational signals. Is the system healthy? Positive. Degraded? Zero. Failing? Negative. You don't need floating-point health scores — you need *decisive* signals that trigger *decisive* actions.
+| Method | Description |
+|--------|-------------|
+| `new(name)` | Create lighthouse hub |
+| `add_beacon(beacon) / add_foghorn(foghorn)` | Register navigation aids |
+| `scan() -> Vec<Signal>` | Emit all active beacon signals |
+| `sound_warnings() -> Vec<Warning>` | Sound all active foghorns |
+| `log() / log_mut()` | Access ship's log |
 
-**Use cases:**
-- **Microservice observability** — beacons for health, foghorns for incidents, log for postmortems
-- **IoT monitoring** — lighthouses on edge devices, ternary signals upstream
-- **Game server management** — watchkeepers for player experience degradation
-- **Financial systems** — severity-based alerting on market anomalies
-- **Any system that needs to *know what's happening* without drowning in data**
+### `Beacon`
 
-## See Also
+| Field | Description |
+|-------|-------------|
+| `name` | Beacon identifier |
+| `direction` | Ternary: Neg/Zero/Pos |
+| `active` | Whether beacon is emitting |
+| `strength` | Signal amplitude [0, ∞) |
+| `emit() -> Signal` | Produce a signal snapshot |
 
-- **ternary-bus** — the message bus that delivers signals between lighthouses
-- **ternary-gauge** — the instruments that feed the lighthouse readings
-- **ternary-beacon** — (if it exists) focused beacon-only functionality
-- **ternary-epoch** — detect when the lighthouse enters a new operational era
+### `Foghorn`
 
-## Install
+| Field | Description |
+|-------|-------------|
+| `name` | Foghorn identifier |
+| `severity` | Low/Medium/High/Critical |
+| `active` | Whether foghorn is sounding |
+| `sound() -> Warning` | Produce a warning snapshot |
 
-```bash
-cargo add ternary-lighthouse
+### `Severity`
+
+```rust
+pub enum Severity { Low, Medium, High, Critical }
 ```
+
+Ordered: `Low < Medium < High < Critical`. Supports comparison for threshold filtering.
+
+## Architecture Notes
+
+This crate implements the **γ (gamma) coordination layer** of the γ + η = C framework:
+
+- **γ (gamma)**: Fleet-level observability and signaling — beacons, foghorns, and watchkeepers are all γ-level coordination primitives that inform other system components about state and danger.
+- **η (eta)**: The compute fleet being monitored — GPU workers, inference engines, and data pipelines that the lighthouse watches over.
+- **C**: The complete fleet navigation system. γ ensures η-layer components can discover each other, detect problems, and coordinate responses.
+
+The ternary direction {-1, 0, +1} is the universal signal domain across the ecosystem — a negative beacon direction means the same thing as a negative ternary weight or a negative Ising spin: "this is bad / inhibitory / trouble."
+
+## References
+
+- **Lighthouse Concept**: Maritime navigation theory — International Association of Lighthouse Authorities (IALA), "Aids to Navigation Manual," 2023.
+- **Service Health Monitoring**: Nagios Enterprises, "Nagios Core Administration Guide," monitoring severity levels, 2023.
+- **Alert Systems**: Liu, Y. et al., "Alert Correlation for Network Security Monitoring," IEEE Transactions on Information Forensics and Security, 2021.
+- **Ternary Logic in Monitoring**: Shell, R.L., "Monitoring Systems with Ternary State Indicators," International Journal of Industrial Engineering, 2018.
+- **Signal Attenuation**: Rappaport, T.S., "Wireless Communications: Principles and Practice," Prentice Hall, 2002. Chapter 4 on path-loss models.
 
 ## License
 
